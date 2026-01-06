@@ -1,0 +1,14 @@
+transport = "http" # http or stdio are supported
+
+[http] # Optional HTTP API configuration
+address = "127.0.0.1:8082"
+path = "/api"
+
+[http.cors] # Optional CORS configuration for HTTP API
+enabled = false
+allowed_methods = ["GET", "POST", "PUT", "DELETE"]
+allowed_origins = ["*"]
+allowed_headers = ["content-type"]
+exposed_headers = [""]
+allow_credentials = false
+allow_private_network = false

@@ -1,0 +1,49 @@
+[package]
+name = "bitcoin_scan"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+anyhow = { workspace = true }
+bech32 = { workspace = true }
+bs58 = { workspace = true }
+flate2 = { workspace = true }
+indicatif = { workspace = true }
+rocksdb = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[workspace]
+members = ["crates/api", "crates/importer"]
+
+[workspace.dependencies]
+hex = "0.4.3"
+tower-http = { version = "0.6.8", features = [
+    "add-extension",
+    "cors",
+    "trace",
+] }
+anyhow = "1.0.100"
+clap = "4.5.54"
+axum = { version = "0.8.8", features = ["macros"] }
+bech32 = "0.9"
+bs58 = "0.5.1"
+flate2 = "1.1.5"
+indicatif = "0.18.3"
+rocksdb = { version = "0.21", features = ["multi-threaded-cf", "zstd"] }
+serde = "1.0.228"
+sha2 = "0.10.9"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+serde_json = "1.0"
+
+
+
+simd-json = { version = "0.17.0", features = ["serde_impl"] }
+strum = { version = "0.27.2", features = ["derive"] }
+strum_macros = "0.27.2"
+figment = { version = "0.10.19", features = ["toml", "env"] }
