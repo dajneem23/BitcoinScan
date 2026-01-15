@@ -4,6 +4,7 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::util::address::Address;
 use bitcoin::util::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::PublicKey;
+use bitcoin_scan::{decode_address, ReadOnlyDatabase, ReadableDatabase, DEFAULT_DB_PATH};
 use fastbloom::BloomFilter;
 use hex::ToHex;
 use mersenne_twister::MT19937;
@@ -69,33 +70,21 @@ struct LocalAddressInfo {
 }
 
 /// Check if address exists in local database via API
-fn check_address_exists_local(address: &str) -> Result<bool, Box<dyn std::error::Error>> {
+fn check_address_exists_local<T: ReadableDatabase>(
+    db: &T,
+    address: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     // print!("Checking local DB for address: {} ... ", address);
-    let url = format!("http://localhost:8082/api/1.0/address/{}", address);
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    
-    debug!("Checking local API for address: {}", address);
-    
-    let response = client.get(&url).send()?;
-
-    if !response.status().is_success() {
-        debug!("Local API returned status: {}", response.status());
-        return Ok(false);
-    }
-    println!("Local API returned status: {}", response.status());
-    let address_info: LocalAddressInfo = response.json()?;
-    
-    // Address exists if info is Some and not null
-    let exists = address_info.info.is_some();
-    if exists {
-        info!("Address {} found in local database", address);
+    if let Some(raw_bytes) = decode_address(address) {
+        // Check if key already exists
+        if !db.exists(&raw_bytes).unwrap_or(false) {
+            return Ok(false);
+        }
+        let info: Option<Vec<u8>> = db.get(raw_bytes).unwrap_or(None);
+        return Ok(info.is_some());
     } else {
-        debug!("Address {} not found in local database", address);
+        return Err("Invalid address format".into());
     }
-    
-    Ok(exists)
 }
 
 /// Fetch address balance and details from mempool.space API
@@ -209,10 +198,7 @@ fn get_balance_with_fallback(
             );
 
             info!("Balance found via mempool.space: {} sats", balance_sats);
-            return Ok((
-                format!("{}", balance_sats),
-                details,
-            ));
+            return Ok((format!("{}", balance_sats), details));
         }
         Err(e) => {
             warn!("mempool.space API error for {}: {}", address, e);
@@ -248,17 +234,10 @@ fn get_balance_with_fallback(
             );
             if info.final_balance == 0 {
                 debug!("Zero balance from blockchain.info for address: {}", address);
-                return Ok((
-                    "0".to_string(),
-                    details,
-                ));
+                return Ok(("0".to_string(), details));
             }
 
-
-            return Ok((
-                format!("${}", info.final_balance),
-                details,
-            ));
+            return Ok((format!("${}", info.final_balance), details));
         }
         Err(e) => {
             warn!("blockchain.info API error for {}: {}", address, e);
@@ -297,15 +276,9 @@ fn get_balance_with_fallback(
             info!("Balance found via BlockCypher: {} sats", info.balance);
             if info.balance == 0 {
                 debug!("Zero balance from BlockCypher for address: {}", address);
-                return Ok((
-                    "0".to_string(),
-                    details,
-                ));
+                return Ok(("0".to_string(), details));
             }
-            return Ok((
-                format!("${}", info.balance),
-                details,
-            ));
+            return Ok((format!("${}", info.balance), details));
         }
         Err(e) => {
             error!("BlockCypher API error for {}: {}", address, e);
@@ -384,15 +357,9 @@ fn log_address_to_file(
 ) {
     if let Ok(mut file) = file.lock() {
         let log_entry = if let Some(bal) = balance {
-            format!(
-                "{},{},{}\n",
-                seed, address, bal
-            )
+            format!("{},{},{}\n", seed, address, bal)
         } else {
-            format!(
-                "{},{},\n",
-                seed, address
-            )
+            format!("{},{},\n", seed, address)
         };
 
         if let Err(e) = file.write_all(log_entry.as_bytes()) {
@@ -414,11 +381,17 @@ fn main() {
         print_usage_and_exit();
     }
 
+    let db = ReadOnlyDatabase::open(&DEFAULT_DB_PATH, true).expect("Cannot open DB");
+
     // Parse --threads argument if present
     let mut custom_threads: Option<usize> = None;
     for i in 0..args.len() {
         if args[i] == "--threads" && i + 1 < args.len() {
-            custom_threads = Some(args[i + 1].parse().expect("threads must be a positive integer"));
+            custom_threads = Some(
+                args[i + 1]
+                    .parse()
+                    .expect("threads must be a positive integer"),
+            );
             break;
         }
     }
@@ -487,7 +460,7 @@ fn main() {
 
         let checked = Arc::new(AtomicU64::new(0));
         let found = Arc::new(AtomicU32::new(0));
-        let report_interval = 10000;
+        let report_interval = 1000;
 
         (0u32..=u32::MAX).into_par_iter().for_each(|seed| {
             debug!("Processing seed: {}", seed);
@@ -507,7 +480,7 @@ fn main() {
                 );
             }
             //check local
-            match check_address_exists_local(&address.to_string()) {
+            match check_address_exists_local(&db, &address.to_string()) {
                 Ok(exists) => {
                     if exists {
                         log_address_to_file(
@@ -559,7 +532,6 @@ fn main() {
             //     }
             //     info!("Bloom filter MATCH for seed {}: {}", seed, address);
             // }
-
         });
 
         info!("\n=== Brute Force Complete ===");

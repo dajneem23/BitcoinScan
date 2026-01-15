@@ -1806,6 +1806,7 @@ version = "0.1.0"
 dependencies = [
  "bip39",
  "bitcoin",
+ "bitcoin_scan",
  "fastbloom",
  "hex",
  "hmac",

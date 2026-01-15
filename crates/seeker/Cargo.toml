@@ -19,3 +19,5 @@ rayon = "1.10"  # Multi-threading
 tracing = "0.1"  # Logging framework
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }  # Tracing subscriber
 fastbloom = "0.14.0"
+
+bitcoin_scan = { path = "../.." }
