@@ -17,7 +17,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [workspace]
-members = ["crates/api", "crates/importer"]
+members = ["crates/api", "crates/importer", "crates/seeker"]
 
 [workspace.dependencies]
 hex = "0.4.3"

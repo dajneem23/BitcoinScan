@@ -1,0 +1,21 @@
+[package]
+name = "seeker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bip39 = "1.1"          # BIP-39 mnemonic utilities
+bitcoin = "0.29"      # address/key derivation utilities
+hex = "0.4"
+mersenne_twister = "1.1"  # MT19937 implementation (32-bit)
+hmac = "0.12"
+sha2 = "0.10"
+pbkdf2 = "0.10"
+rand = "0.4"
+reqwest = { version = "0.11", features = ["blocking", "json", "socks"] }  # HTTP client with SOCKS proxy support
+serde = { version = "1.0", features = ["derive"] }  # JSON deserialization
+serde_json = "1.0"
+rayon = "1.10"  # Multi-threading
+tracing = "0.1"  # Logging framework
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }  # Tracing subscriber
+fastbloom = "0.14.0"

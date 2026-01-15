@@ -52,7 +52,7 @@ pub fn import_addresses(
                 if !db.exists(&raw_bytes).unwrap_or(false) {
                     // Key: 20 bytes hash, Value: Rỗng (tiết kiệm chỗ)
                     //TODO: add timestamp or source info into value
-                    batch.put(&raw_bytes, b"-1");
+                    batch.put(&raw_bytes, b"0");
                     counter += 1;
                 } else {
                     skipped += 1;

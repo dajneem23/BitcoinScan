@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -70,11 +71,21 @@ pub async fn address_info(
     if let Some(raw_bytes) = decode_address(address.as_str()) {
         // Check if key already exists
         if !state.db.exists(&raw_bytes).unwrap_or(false) {
-            return Json(serde_json::json!({ "error": "Address not found" }));
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({ 
+                "address": address,
+                "info": null 
+            })));
         }
         let info: Option<Vec<u8>> = state.db.get(raw_bytes).unwrap_or(None);
-        return Json(serde_json::json!({ "info": info }));
+        return (StatusCode::OK, Json(serde_json::json!({ 
+            "address": address,
+            "info": info 
+        })));
     } else {
-        return Json(serde_json::json!({ "error": "Invalid address format" }));
+        return (StatusCode::EXPECTATION_FAILED,Json(serde_json::json!({ 
+            "address": address,
+            "info": null,
+            "error": "Invalid address format" 
+        })));
     }
 }
