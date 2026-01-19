@@ -24,6 +24,15 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
+/// Checkpoint structure for crash recovery
+#[derive(Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    last_seed: u32,
+    entropy_bits: usize,
+    checked_count: u64,
+    found_count: u32,
+}
+
 /// Stats structure from mempool.space API
 #[derive(Debug, Deserialize, Serialize)]
 struct AddressStats {
@@ -368,6 +377,25 @@ fn log_address_to_file(
     }
 }
 
+/// Save checkpoint to file
+fn save_checkpoint(checkpoint_file: &str, checkpoint: &Checkpoint) {
+    if let Ok(json) = serde_json::to_string_pretty(checkpoint) {
+        if let Err(e) = std::fs::write(checkpoint_file, json) {
+            error!("Failed to save checkpoint: {}", e);
+        }
+    }
+}
+
+/// Load checkpoint from file
+fn load_checkpoint(checkpoint_file: &str) -> Option<Checkpoint> {
+    if let Ok(content) = std::fs::read_to_string(checkpoint_file) {
+        if let Ok(checkpoint) = serde_json::from_str::<Checkpoint>(&content) {
+            return Some(checkpoint);
+        }
+    }
+    None
+}
+
 fn main() {
     // Initialize tracing with thread IDs
     tracing_subscriber::fmt()
@@ -436,7 +464,22 @@ fn main() {
 
         // Load existing addresses from log file
         let log_filename = format!("brute_force_all_{}.log", entropy_bits);
+        let checkpoint_filename = format!("brute_force_all_{}.checkpoint", entropy_bits);
         // let existing_addresses = Arc::new(load_existing_addresses(&log_filename));
+
+        // Load checkpoint if exists
+        let (start_seed, initial_checked, initial_found) = if let Some(checkpoint) = load_checkpoint(&checkpoint_filename) {
+            if checkpoint.entropy_bits == entropy_bits {
+                info!("Resuming from checkpoint: seed={}, checked={}, found={}", 
+                    checkpoint.last_seed, checkpoint.checked_count, checkpoint.found_count);
+                (checkpoint.last_seed + 1, checkpoint.checked_count, checkpoint.found_count)
+            } else {
+                warn!("Checkpoint entropy_bits mismatch. Starting from beginning.");
+                (0, 0, 0)
+            }
+        } else {
+            (0, 0, 0)
+        };
 
         // Create log file
         let log_file = OpenOptions::new()
@@ -447,22 +490,25 @@ fn main() {
         let log_file = Arc::new(Mutex::new(log_file));
 
         info!("=== Brute Force ALL Mode (Full 2^32 Space) ===");
-        info!("Start seed: 0");
+        info!("Start seed: {}", start_seed);
         info!("End seed: {}", u32::MAX);
         info!("Entropy bits: {}", entropy_bits);
-        info!("Total seeds to check: {}", (u32::MAX as u64) + 1);
+        info!("Total seeds to check: {}", (u32::MAX as u64) + 1 - (start_seed as u64));
         info!(
             "Using multi-threading with {} threads",
             rayon::current_num_threads()
         );
-        info!("Logging to: brute_force_all.log");
+        info!("Logging to: {}", log_filename);
+        info!("Checkpoint file: {}", checkpoint_filename);
         info!("Starting brute force...\n");
 
-        let checked = Arc::new(AtomicU64::new(0));
-        let found = Arc::new(AtomicU32::new(0));
+        let checked = Arc::new(AtomicU64::new(initial_checked));
+        let found = Arc::new(AtomicU32::new(initial_found));
         let report_interval = 1000;
+        let checkpoint_interval = 10000; // Save checkpoint every 10000 seeds
+        let checkpoint_file_arc = Arc::new(checkpoint_filename.clone());
 
-        (0u32..=u32::MAX).into_par_iter().for_each(|seed| {
+        (start_seed..=u32::MAX).into_par_iter().for_each(|seed| {
             debug!("Processing seed: {}", seed);
             let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
             let entropy_hex = entropy.encode_hex::<String>();
@@ -479,6 +525,19 @@ fn main() {
                     current_checked, current_found, seed
                 );
             }
+
+            // Save checkpoint periodically
+            if current_checked % checkpoint_interval == 0 {
+                let checkpoint = Checkpoint {
+                    last_seed: seed,
+                    entropy_bits,
+                    checked_count: current_checked,
+                    found_count: found.load(Ordering::Relaxed),
+                };
+                save_checkpoint(&checkpoint_file_arc, &checkpoint);
+                debug!("Checkpoint saved at seed {}", seed);
+            }
+
             //check local
             match check_address_exists_local(&db, &address.to_string()) {
                 Ok(exists) => {
@@ -537,6 +596,13 @@ fn main() {
         info!("\n=== Brute Force Complete ===");
         info!("Total seeds checked: {}", checked.load(Ordering::Relaxed));
         info!("Addresses with balance: {}", found.load(Ordering::Relaxed));
+        
+        // Remove checkpoint file on completion
+        if let Err(e) = std::fs::remove_file(&checkpoint_filename) {
+            debug!("Failed to remove checkpoint file: {}", e);
+        } else {
+            info!("Checkpoint file removed.");
+        }
         return;
     }
 
@@ -566,6 +632,21 @@ fn main() {
 
         // Load existing addresses from log file
         let log_filename = format!("brute_force_{}_{}.log", start_seed, end_seed);
+        let checkpoint_filename = format!("brute_force_{}_{}.checkpoint", start_seed, end_seed);
+
+        // Load checkpoint if exists
+        let (resume_seed, initial_checked, initial_found) = if let Some(checkpoint) = load_checkpoint(&checkpoint_filename) {
+            if checkpoint.entropy_bits == entropy_bits && checkpoint.last_seed >= start_seed && checkpoint.last_seed < end_seed {
+                info!("Resuming from checkpoint: seed={}, checked={}, found={}", 
+                    checkpoint.last_seed, checkpoint.checked_count, checkpoint.found_count);
+                (checkpoint.last_seed + 1, checkpoint.checked_count, checkpoint.found_count)
+            } else {
+                warn!("Checkpoint invalid or out of range. Starting from beginning.");
+                (start_seed, 0, 0)
+            }
+        } else {
+            (start_seed, 0, 0)
+        };
 
         // Create log file
         let log_file = OpenOptions::new()
@@ -576,22 +657,25 @@ fn main() {
         let log_file = Arc::new(Mutex::new(log_file));
 
         info!("=== Brute Force Mode (Multi-threaded) ===");
-        info!("Start seed: {}", start_seed);
+        info!("Start seed: {}", resume_seed);
         info!("End seed: {}", end_seed);
         info!("Entropy bits: {}", entropy_bits);
         info!(
             "Total seeds to check: {}",
-            (end_seed as u64) - (start_seed as u64) + 1
+            (end_seed as u64) - (resume_seed as u64) + 1
         );
         info!("Using {} threads", rayon::current_num_threads());
         info!("Logging to: {}", log_filename);
+        info!("Checkpoint file: {}", checkpoint_filename);
         info!("Starting brute force...\n");
 
-        let checked = Arc::new(AtomicU64::new(0));
-        let found = Arc::new(AtomicU32::new(0));
+        let checked = Arc::new(AtomicU64::new(initial_checked));
+        let found = Arc::new(AtomicU32::new(initial_found));
         let report_interval = 1000;
+        let checkpoint_interval = 10000; // Save checkpoint every 10000 seeds
+        let checkpoint_file_arc = Arc::new(checkpoint_filename.clone());
 
-        (start_seed..=end_seed).into_par_iter().for_each(|seed| {
+        (resume_seed..=end_seed).into_par_iter().for_each(|seed| {
             debug!("Processing seed: {}", seed);
             let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
             let entropy_hex = entropy.encode_hex::<String>();
@@ -607,6 +691,18 @@ fn main() {
                     "Progress: checked={}, found={}, current_seed={}",
                     current_checked, current_found, seed
                 );
+            }
+
+            // Save checkpoint periodically
+            if current_checked % checkpoint_interval == 0 {
+                let checkpoint = Checkpoint {
+                    last_seed: seed,
+                    entropy_bits,
+                    checked_count: current_checked,
+                    found_count: found.load(Ordering::Relaxed),
+                };
+                save_checkpoint(&checkpoint_file_arc, &checkpoint);
+                debug!("Checkpoint saved at seed {}", seed);
             }
 
             // Bloom filter check
@@ -660,6 +756,13 @@ fn main() {
         info!("\n=== Brute Force Complete ===");
         info!("Total seeds checked: {}", checked.load(Ordering::Relaxed));
         info!("Addresses with balance: {}", found.load(Ordering::Relaxed));
+        
+        // Remove checkpoint file on completion
+        if let Err(e) = std::fs::remove_file(&checkpoint_filename) {
+            debug!("Failed to remove checkpoint file: {}", e);
+        } else {
+            info!("Checkpoint file removed.");
+        }
         return;
     }
 
