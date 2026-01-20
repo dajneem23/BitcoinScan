@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use bech32::{FromBase32, ToBase32};
 
 
 /// Giải mã địa chỉ Bitcoin sang dạng Bytes thô (Raw Hash Payload)
@@ -29,18 +30,19 @@ pub fn decode_address(addr: &str) -> Option<Vec<u8>> {
     }
     // --- CASE 2: BECH32 / BECH32M (Native Segwit 'bc1...') ---
     else if addr.starts_with("bc1") {
+        
         // bech32::decode trả về: (HumanReadablePart, Data 5-bit, Variant)
         if let Ok((_hrp, data_u5, _variant)) = bech32::decode(addr) {
             // ⚠️ QUAN TRỌNG: Dữ liệu trả về đang ở dạng 5-bit (u5).
             // Phải convert sang 8-bit (u8) chuẩn của máy tính.
-            if let Ok(data_u8) = bech32::convert_bits(&data_u5, 5, 8, false) {
+            if let Ok(data_u8) = Vec::<u8>::from_base32(&data_u5) {
                 // Cấu trúc Segwit decoded: [1 byte Witness Version] + [Program Hash]
 
                 // Kiểm tra độ dài hợp lệ:
                 // - P2WPKH (v0): 1 byte ver + 20 bytes hash = 21 bytes
                 // - P2WSH (v0):  1 byte ver + 32 bytes hash = 33 bytes
                 // - P2TR (v1):   1 byte ver + 32 bytes hash = 33 bytes
-                if data_u8.len() >= 21 {
+                if data_u8.len() >= 21 && data_u8.len() <= 33 {
                     // Bỏ byte đầu tiên (Witness Version 0x00 hoặc 0x01)
                     // Chỉ lấy phần Hash phía sau để lưu vào DB
                     return Some(data_u8[1..].to_vec());
