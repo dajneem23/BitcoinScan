@@ -1,6 +1,5 @@
 use sha2::{Digest, Sha256};
 
-
 /// Giải mã địa chỉ Bitcoin sang dạng Bytes thô (Raw Hash Payload)
 /// - Legacy/P2SH (1..., 3...): Trả về 20 bytes Hash160.
 /// - Segwit v0 (bc1q...): Trả về 20 bytes (P2WPKH) hoặc 32 bytes (P2WSH).
@@ -31,18 +30,13 @@ pub fn decode_address(addr: &str) -> Option<Vec<u8>> {
     else if addr.starts_with("bc1") {
         // Decode bech32 address
         if let Ok((_hrp, data, _variant)) = bech32::decode(addr) {
-            if data.is_empty() {
-                return None;
-            }
-            
-            // First u5 is the witness version, rest is the program
-            // Convert witness program from base32 (5-bit) to base256 (8-bit)
+            // Convert from base32 (5-bit) to base256 (8-bit)
+            // This properly handles the witness version and program
             let mut bytes = Vec::new();
             let mut buffer = 0u32;
             let mut bits = 0;
             
-            // Skip first element (witness version)
-            for value in data.iter().skip(1) {
+            for value in data {
                 buffer = (buffer << 5) | (value.to_u8() as u32);
                 bits += 5;
                 
@@ -53,15 +47,40 @@ pub fn decode_address(addr: &str) -> Option<Vec<u8>> {
                 }
             }
             
-            // P2WPKH: 20 bytes hash
-            // P2WSH: 32 bytes hash
-            // P2TR: 32 bytes hash
-            if bytes.len() == 20 || bytes.len() == 32 {
-                return Some(bytes);
+            // Witness program should be: [version byte] + [20 or 32 bytes hash]
+            // P2WPKH: version 0 + 20 bytes
+            // P2WSH: version 0 + 32 bytes
+            // P2TR: version 1 + 32 bytes
+            if bytes.len() == 21 || bytes.len() == 33 {
+                // Return hash without version byte
+                return Some(bytes[1..].to_vec());
             }
         }
     }
 
     // Không phải định dạng hợp lệ
     None
+}
+
+fn main() {
+    let test_addresses = vec![
+        "bc1qyu5v99d8urfxc3vk4ddrcr38yfuz9w8vxycdy6",
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        "3J98t1WpEZ73CNmYviecrnyiWrnqRhWNLy",
+    ];
+    
+    for addr in test_addresses {
+        println!("\n=== Testing address: {} ===", addr);
+        
+        match decode_address(addr) {
+            Some(hash) => {
+                println!("✓ Decoded successfully!");
+                println!("  Hash length: {} bytes", hash.len());
+                println!("  Hash (hex): {}", hex::encode(&hash));
+            }
+            None => {
+                println!("✗ Failed to decode");
+            }
+        }
+    }
 }

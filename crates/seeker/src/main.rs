@@ -92,6 +92,11 @@ fn check_address_exists_local<T: ReadableDatabase>(
         let info: Option<Vec<u8>> = db.get(raw_bytes).unwrap_or(None);
         return Ok(info.is_some());
     } else {
+        // For bech32 addresses that can't be decoded, return false instead of error
+        if address.starts_with("bc1") {
+            debug!("Bech32 address could not be decoded: {}", address);
+            return Ok(false);
+        }
         return Err("Invalid address format".into());
     }
 }
@@ -515,18 +520,18 @@ fn main() {
         // let existing_addresses = Arc::new(load_existing_addresses(&log_filename));
 
         // Load checkpoint if exists
-        let (start_seed, initial_checked, initial_found) = if let Some(checkpoint) = load_checkpoint(&checkpoint_filename) {
-            if checkpoint.entropy_bits == entropy_bits {
-                info!("Resuming from checkpoint: seed={}, checked={}, found={}", 
-                    checkpoint.last_seed, checkpoint.checked_count, checkpoint.found_count);
-                (checkpoint.last_seed + 1, checkpoint.checked_count, checkpoint.found_count)
-            } else {
-                warn!("Checkpoint entropy_bits mismatch. Starting from beginning.");
-                (0, 0, 0)
-            }
-        } else {
-            (0, 0, 0)
-        };
+        // let (start_seed, initial_checked, initial_found) = if let Some(checkpoint) = load_checkpoint(&checkpoint_filename) {
+        //     if checkpoint.entropy_bits == entropy_bits {
+        //         info!("Resuming from checkpoint: seed={}, checked={}, found={}", 
+        //             checkpoint.last_seed, checkpoint.checked_count, checkpoint.found_count);
+        //         (checkpoint.last_seed + 1, checkpoint.checked_count, checkpoint.found_count)
+        //     } else {
+        //         warn!("Checkpoint entropy_bits mismatch. Starting from beginning.");
+        //         (0, 0, 0)
+        //     }
+        // } else {
+        //     (0, 0, 0)
+        // };
 
         // Create log file
         let log_file = OpenOptions::new()
@@ -537,10 +542,10 @@ fn main() {
         let log_file = Arc::new(Mutex::new(log_file));
 
         info!("=== Brute Force ALL Mode (Full 2^32 Space) ===");
-        info!("Start seed: {}", start_seed);
+        info!("Start seed: {}", 0);
         info!("End seed: {}", u32::MAX);
         info!("Entropy bits: {}", entropy_bits);
-        info!("Total seeds to check: {}", (u32::MAX as u64) + 1 - (start_seed as u64));
+        info!("Total seeds to check: {}", (u32::MAX as u64) + 1 - (0 as u64));
         info!(
             "Using multi-threading with {} threads",
             rayon::current_num_threads()
@@ -549,13 +554,13 @@ fn main() {
         info!("Checkpoint file: {}", checkpoint_filename);
         info!("Starting brute force...\n");
 
-        let checked = Arc::new(AtomicU64::new(initial_checked));
-        let found = Arc::new(AtomicU32::new(initial_found));
+        let checked = Arc::new(AtomicU64::new(0));
+        let found = Arc::new(AtomicU32::new(0));
         let report_interval = 1000;
         let checkpoint_interval = 10000; // Save checkpoint every 10000 seeds
         let checkpoint_file_arc = Arc::new(checkpoint_filename.clone());
 
-        (start_seed..=u32::MAX).into_par_iter().for_each(|seed| {
+        (0..=u32::MAX).into_par_iter().for_each(|seed| {
             debug!("Processing seed: {}", seed);
             let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
             let entropy_hex = entropy.encode_hex::<String>();
@@ -574,16 +579,16 @@ fn main() {
             }
 
             // Save checkpoint periodically
-            if current_checked % checkpoint_interval == 0 {
-                let checkpoint = Checkpoint {
-                    last_seed: seed,
-                    entropy_bits,
-                    checked_count: current_checked,
-                    found_count: found.load(Ordering::Relaxed),
-                };
-                save_checkpoint(&checkpoint_file_arc, &checkpoint);
-                debug!("Checkpoint saved at seed {}", seed);
-            }
+            // if current_checked % checkpoint_interval == 0 {
+                // let checkpoint = Checkpoint {
+                //     last_seed: seed,
+                //     entropy_bits,
+                //     checked_count: current_checked,
+                //     found_count: found.load(Ordering::Relaxed),
+                // };
+                // save_checkpoint(&checkpoint_file_arc, &checkpoint);
+                // debug!("Checkpoint saved at seed {}", seed);
+            // }
 
             // Check all BIP addresses in local DB
             for (bip_type, address) in &addresses {
@@ -842,26 +847,26 @@ fn main() {
     info!("Mnemonic: {}", mnemonic.to_string());
 
     // Derive all Bitcoin addresses
-    let addresses = mnemonic_to_all_addrs(&mnemonic);
-    info!("\n=== Derived Bitcoin Addresses ===");
-    for (bip_type, address) in &addresses {
-        info!("{}: {}", bip_type, address);
-    }
+    // let addresses = mnemonic_to_all_addrs(&mnemonic);
+    // info!("\n=== Derived Bitcoin Addresses ===");
+    // for (bip_type, address) in &addresses {
+    //     info!("{}: {}", bip_type, address);
+    // }
 
     // Fetch balance for all addresses
-    info!("\n=== Fetching Balances ===");
-    for (bip_type, address) in &addresses {
-        info!("\nChecking {} address: {}", bip_type, address);
-        match get_balance_with_fallback(&address.to_string()) {
-            Ok((balance, details)) => {
-                info!("\n=== {} Address Information ===", bip_type);
-                info!("{}", details);
-                info!("\n=== Current Balance ===");
-                info!("Balance: {}", balance);
-            }
-            Err(e) => {
-                error!("Error fetching {} address balance: {}", bip_type, e);
-            }
-        }
-    }
+    // info!("\n=== Fetching Balances ===");
+    // for (bip_type, address) in &addresses {
+    //     info!("\nChecking {} address: {}", bip_type, address);
+    //     match get_balance_with_fallback(&address.to_string()) {
+    //         Ok((balance, details)) => {
+    //             info!("\n=== {} Address Information ===", bip_type);
+    //             info!("{}", details);
+    //             info!("\n=== Current Balance ===");
+    //             info!("Balance: {}", balance);
+    //         }
+    //         Err(e) => {
+    //             error!("Error fetching {} address balance: {}", bip_type, e);
+    //         }
+    //     }
+    // }
 }
