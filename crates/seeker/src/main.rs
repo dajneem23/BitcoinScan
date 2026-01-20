@@ -321,7 +321,8 @@ fn entropy_to_mnemonic(entropy: &[u8]) -> Mnemonic {
 
 /// Derive the first external (0) address for BIP44 m/44'/0'/0'/0/0 using mnemonic.
 /// This uses BIP39 -> seed -> BIP32 to derive an xprv and get address.
-fn mnemonic_to_first_btc_addr(mnemonic: &Mnemonic) -> Address {
+/// Returns P2PKH address (legacy, starts with 1)
+fn mnemonic_to_bip44_addr(mnemonic: &Mnemonic) -> Address {
     // BIP39 seed (no passphrase)
     let passphrase = "";
     let seed = mnemonic.to_seed(passphrase);
@@ -338,6 +339,51 @@ fn mnemonic_to_first_btc_addr(mnemonic: &Mnemonic) -> Address {
     let secp_pubkey = child.private_key.public_key(&secp);
     let pubkey = PublicKey::new(secp_pubkey);
     Address::p2pkh(&pubkey, network)
+}
+
+/// Derive the first external (0) address for BIP49 m/49'/0'/0'/0/0 using mnemonic.
+/// Returns P2SH-P2WPKH address (SegWit wrapped, starts with 3)
+fn mnemonic_to_bip49_addr(mnemonic: &Mnemonic) -> Address {
+    let passphrase = "";
+    let seed = mnemonic.to_seed(passphrase);
+    let network = Network::Bitcoin;
+    let secp = Secp256k1::new();
+    let xprv = ExtendedPrivKey::new_master(network, &seed).expect("xprv master");
+
+    // BIP49 path m/49'/0'/0'/0/0
+    let path = DerivationPath::from_str("m/49'/0'/0'/0/0").expect("derivation path");
+
+    let child = xprv.derive_priv(&secp, &path).expect("derive child");
+    let secp_pubkey = child.private_key.public_key(&secp);
+    let pubkey = PublicKey::new(secp_pubkey);
+    Address::p2shwpkh(&pubkey, network).expect("p2shwpkh address")
+}
+
+/// Derive the first external (0) address for BIP84 m/84'/0'/0'/0/0 using mnemonic.
+/// Returns P2WPKH address (native SegWit, starts with bc1q)
+fn mnemonic_to_bip84_addr(mnemonic: &Mnemonic) -> Address {
+    let passphrase = "";
+    let seed = mnemonic.to_seed(passphrase);
+    let network = Network::Bitcoin;
+    let secp = Secp256k1::new();
+    let xprv = ExtendedPrivKey::new_master(network, &seed).expect("xprv master");
+
+    // BIP84 path m/84'/0'/0'/0/0
+    let path = DerivationPath::from_str("m/84'/0'/0'/0/0").expect("derivation path");
+
+    let child = xprv.derive_priv(&secp, &path).expect("derive child");
+    let secp_pubkey = child.private_key.public_key(&secp);
+    let pubkey = PublicKey::new(secp_pubkey);
+    Address::p2wpkh(&pubkey, network).expect("p2wpkh address")
+}
+
+/// Derive all three BIP standard addresses from mnemonic
+fn mnemonic_to_all_addrs(mnemonic: &Mnemonic) -> Vec<(String, Address)> {
+    vec![
+        ("BIP44".to_string(), mnemonic_to_bip44_addr(mnemonic)),
+        ("BIP49".to_string(), mnemonic_to_bip49_addr(mnemonic)),
+        ("BIP84".to_string(), mnemonic_to_bip84_addr(mnemonic)),
+    ]
 }
 
 fn print_usage_and_exit() -> ! {
@@ -362,13 +408,14 @@ fn log_address_to_file(
     entropy_hex: &str,
     mnemonic: &str,
     address: &str,
+    bip_type: &str,
     balance: Option<&str>,
 ) {
     if let Ok(mut file) = file.lock() {
         let log_entry = if let Some(bal) = balance {
-            format!("{},{},{}\n", seed, address, bal)
+            format!("{},{},{},{}\n", seed, bip_type, address, bal)
         } else {
-            format!("{},{},\n", seed, address)
+            format!("{},{},{},\n", seed, bip_type, address)
         };
 
         if let Err(e) = file.write_all(log_entry.as_bytes()) {
@@ -513,7 +560,7 @@ fn main() {
             let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
             let entropy_hex = entropy.encode_hex::<String>();
             let mnemonic = entropy_to_mnemonic(&entropy);
-            let address = mnemonic_to_first_btc_addr(&mnemonic);
+            let addresses = mnemonic_to_all_addrs(&mnemonic);
 
             let current_checked = checked.fetch_add(1, Ordering::Relaxed);
 
@@ -538,39 +585,35 @@ fn main() {
                 debug!("Checkpoint saved at seed {}", seed);
             }
 
-            //check local
-            match check_address_exists_local(&db, &address.to_string()) {
-                Ok(exists) => {
-                    if exists {
-                        log_address_to_file(
-                            &log_file,
-                            seed,
-                            &entropy_hex,
-                            &mnemonic.to_string(),
-                            &address.to_string(),
-                            Some("found in local DB"),
-                        );
-                        let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
-                        info!("╔═══════════════════════════════════════════════════════════════╗");
-                        info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
-                        info!("╚═══════════════════════════════════════════════════════════════╝");
-                        info!("Seed: {}", seed);
-                        info!("Address: {}", address);
-                        info!("Mnemonic: {}", mnemonic);
-                        info!("Total found so far: {}", new_found);
-                        info!("═══════════════════════════════════════════════════════════════\n");
-                        log_address_to_file(
-                            &log_file,
-                            seed,
-                            &entropy_hex,
-                            &mnemonic.to_string(),
-                            &address.to_string(),
-                            Some("found in local DB"),
-                        );
+            // Check all BIP addresses in local DB
+            for (bip_type, address) in &addresses {
+                match check_address_exists_local(&db, &address.to_string()) {
+                    Ok(exists) => {
+                        if exists {
+                            let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
+                            info!("╔═══════════════════════════════════════════════════════════════╗");
+                            info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
+                            info!("╚═══════════════════════════════════════════════════════════════╝");
+                            info!("Seed: {}", seed);
+                            info!("BIP Type: {}", bip_type);
+                            info!("Address: {}", address);
+                            info!("Mnemonic: {}", mnemonic);
+                            info!("Total found so far: {}", new_found);
+                            info!("═══════════════════════════════════════════════════════════════\n");
+                            log_address_to_file(
+                                &log_file,
+                                seed,
+                                &entropy_hex,
+                                &mnemonic.to_string(),
+                                &address.to_string(),
+                                bip_type,
+                                Some("found in local DB"),
+                            );
+                        }
                     }
-                }
-                Err(e) => {
-                    error!("Error checking local DB for {}: {}", address, e);
+                    Err(e) => {
+                        error!("Error checking local DB for {} {}: {}", bip_type, address, e);
+                    }
                 }
             }
 
@@ -680,7 +723,7 @@ fn main() {
             let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
             let entropy_hex = entropy.encode_hex::<String>();
             let mnemonic = entropy_to_mnemonic(&entropy);
-            let address = mnemonic_to_first_btc_addr(&mnemonic);
+            let addresses = mnemonic_to_all_addrs(&mnemonic);
 
             let current_checked = checked.fetch_add(1, Ordering::Relaxed);
 
@@ -705,50 +748,55 @@ fn main() {
                 debug!("Checkpoint saved at seed {}", seed);
             }
 
-            // Bloom filter check
-            // if let Some(filter) = &bloom_filter {
-            //     if !filter.contains(address.to_string().as_bytes()) {
-            //         return;
-            //     }
-            //     info!("Bloom filter match for seed {}: {}", seed, address);
-            // }
+            // Check balance for all BIP addresses
+            for (bip_type, address) in &addresses {
+                // Bloom filter check
+                // if let Some(filter) = &bloom_filter {
+                //     if !filter.contains(address.to_string().as_bytes()) {
+                //         continue;
+                //     }
+                //     info!("Bloom filter match for seed {} {}: {}", seed, bip_type, address);
+                // }
 
-            // Check balance
-            match get_balance_with_fallback(&address.to_string()) {
-                // Log to file
-                Ok((balance, details)) => {
-                    log_address_to_file(
-                        &log_file,
-                        seed,
-                        &entropy_hex,
-                        &mnemonic.to_string(),
-                        &address.to_string(),
-                        Some(&balance),
-                    );
-                    if !balance.starts_with("0 sats") {
-                        let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
-                        info!("╔═══════════════════════════════════════════════════════════════╗");
-                        info!("║ FOUND ADDRESS WITH BALANCE!");
-                        info!("╚═══════════════════════════════════════════════════════════════╝");
-                        info!("Seed: {}", seed);
-                        info!("Address: {}", address);
-                        info!("Mnemonic: {}", mnemonic);
-                        info!("\n{}", details);
-                        info!("\nBalance: {}", balance);
-                        info!("Total found so far: {}", new_found);
-                        info!("═══════════════════════════════════════════════════════════════\n");
+                // Check balance
+                match get_balance_with_fallback(&address.to_string()) {
+                    Ok((balance, details)) => {
+                        log_address_to_file(
+                            &log_file,
+                            seed,
+                            &entropy_hex,
+                            &mnemonic.to_string(),
+                            &address.to_string(),
+                            bip_type,
+                            Some(&balance),
+                        );
+                        if !balance.starts_with("0 sats") {
+                            let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
+                            info!("╔═══════════════════════════════════════════════════════════════╗");
+                            info!("║ FOUND ADDRESS WITH BALANCE!");
+                            info!("╚═══════════════════════════════════════════════════════════════╝");
+                            info!("Seed: {}", seed);
+                            info!("BIP Type: {}", bip_type);
+                            info!("Address: {}", address);
+                            info!("Mnemonic: {}", mnemonic);
+                            info!("\n{}", details);
+                            info!("\nBalance: {}", balance);
+                            info!("Total found so far: {}", new_found);
+                            info!("═══════════════════════════════════════════════════════════════\n");
+                        }
                     }
-                }
-                Err(e) => {
-                    log_address_to_file(
-                        &log_file,
-                        seed,
-                        &entropy_hex,
-                        &mnemonic.to_string(),
-                        &address.to_string(),
-                        None,
-                    );
-                    warn!("API error at seed {}: {}", seed, e);
+                    Err(e) => {
+                        log_address_to_file(
+                            &log_file,
+                            seed,
+                            &entropy_hex,
+                            &mnemonic.to_string(),
+                            &address.to_string(),
+                            bip_type,
+                            None,
+                        );
+                        warn!("API error for {} at seed {}: {}", bip_type, seed, e);
+                    }
                 }
             }
         });
@@ -793,21 +841,27 @@ fn main() {
     let mnemonic = entropy_to_mnemonic(&entropy);
     info!("Mnemonic: {}", mnemonic.to_string());
 
-    // Derive Bitcoin first address
-    let address = mnemonic_to_first_btc_addr(&mnemonic);
-    info!("Derived Bitcoin address (m/44'/0'/0'/0/0): {}", address);
+    // Derive all Bitcoin addresses
+    let addresses = mnemonic_to_all_addrs(&mnemonic);
+    info!("\n=== Derived Bitcoin Addresses ===");
+    for (bip_type, address) in &addresses {
+        info!("{}: {}", bip_type, address);
+    }
 
-    // Fetch address balance with fallback APIs
-    info!("\nFetching address balance...");
-    match get_balance_with_fallback(&address.to_string()) {
-        Ok((balance, details)) => {
-            info!("\n=== Address Information ===");
-            info!("{}", details);
-            info!("\n=== Current Balance ===");
-            info!("Balance: {}", balance);
-        }
-        Err(e) => {
-            error!("Error fetching address balance: {}", e);
+    // Fetch balance for all addresses
+    info!("\n=== Fetching Balances ===");
+    for (bip_type, address) in &addresses {
+        info!("\nChecking {} address: {}", bip_type, address);
+        match get_balance_with_fallback(&address.to_string()) {
+            Ok((balance, details)) => {
+                info!("\n=== {} Address Information ===", bip_type);
+                info!("{}", details);
+                info!("\n=== Current Balance ===");
+                info!("Balance: {}", balance);
+            }
+            Err(e) => {
+                error!("Error fetching {} address balance: {}", bip_type, e);
+            }
         }
     }
 }
