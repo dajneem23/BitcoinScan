@@ -753,54 +753,34 @@ fn main() {
                 debug!("Checkpoint saved at seed {}", seed);
             }
 
-            // Check balance for all BIP addresses
+            // Check all BIP addresses in local DB
             for (bip_type, address) in &addresses {
-                // Bloom filter check
-                // if let Some(filter) = &bloom_filter {
-                //     if !filter.contains(address.to_string().as_bytes()) {
-                //         continue;
-                //     }
-                //     info!("Bloom filter match for seed {} {}: {}", seed, bip_type, address);
-                // }
-
-                // Check balance
-                match get_balance_with_fallback(&address.to_string()) {
-                    Ok((balance, details)) => {
-                        log_address_to_file(
-                            &log_file,
-                            seed,
-                            &entropy_hex,
-                            &mnemonic.to_string(),
-                            &address.to_string(),
-                            bip_type,
-                            Some(&balance),
-                        );
-                        if !balance.starts_with("0 sats") {
+                match check_address_exists_local(&db, &address.to_string()) {
+                    Ok(exists) => {
+                        if exists {
                             let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
                             info!("╔═══════════════════════════════════════════════════════════════╗");
-                            info!("║ FOUND ADDRESS WITH BALANCE!");
+                            info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
                             info!("╚═══════════════════════════════════════════════════════════════╝");
                             info!("Seed: {}", seed);
                             info!("BIP Type: {}", bip_type);
                             info!("Address: {}", address);
                             info!("Mnemonic: {}", mnemonic);
-                            info!("\n{}", details);
-                            info!("\nBalance: {}", balance);
                             info!("Total found so far: {}", new_found);
                             info!("═══════════════════════════════════════════════════════════════\n");
+                            log_address_to_file(
+                                &log_file,
+                                seed,
+                                &entropy_hex,
+                                &mnemonic.to_string(),
+                                &address.to_string(),
+                                bip_type,
+                                Some("found in local DB"),
+                            );
                         }
                     }
                     Err(e) => {
-                        log_address_to_file(
-                            &log_file,
-                            seed,
-                            &entropy_hex,
-                            &mnemonic.to_string(),
-                            &address.to_string(),
-                            bip_type,
-                            None,
-                        );
-                        warn!("API error for {} at seed {}: {}", bip_type, seed, e);
+                        error!("Error checking local DB for {} {}: {}", bip_type, address, e);
                     }
                 }
             }
