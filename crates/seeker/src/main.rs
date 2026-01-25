@@ -311,7 +311,7 @@ fn mt19937_bytes_from_seed(seed: u32, out_len: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(out_len);
     while out.len() < out_len {
         let v: u32 = mt.gen();
-        out.extend_from_slice(&v.to_le_bytes()); // bx likely used platform byte order; using little-endian here
+        out.push(v as u8); // Keep only the lowest 8 bits
     }
     out.truncate(out_len);
     out
@@ -517,21 +517,20 @@ fn main() {
         // Load existing addresses from log file
         let log_filename = format!("brute_force_all_{}.log", entropy_bits);
         let checkpoint_filename = format!("brute_force_all_{}.checkpoint", entropy_bits);
-        // let existing_addresses = Arc::new(load_existing_addresses(&log_filename));
-
+        
         // Load checkpoint if exists
-        // let (start_seed, initial_checked, initial_found) = if let Some(checkpoint) = load_checkpoint(&checkpoint_filename) {
-        //     if checkpoint.entropy_bits == entropy_bits {
-        //         info!("Resuming from checkpoint: seed={}, checked={}, found={}", 
-        //             checkpoint.last_seed, checkpoint.checked_count, checkpoint.found_count);
-        //         (checkpoint.last_seed + 1, checkpoint.checked_count, checkpoint.found_count)
-        //     } else {
-        //         warn!("Checkpoint entropy_bits mismatch. Starting from beginning.");
-        //         (0, 0, 0)
-        //     }
-        // } else {
-        //     (0, 0, 0)
-        // };
+        let (start_seed, initial_checked, initial_found) = if let Some(checkpoint) = load_checkpoint(&checkpoint_filename) {
+            if checkpoint.entropy_bits == entropy_bits {
+                info!("Resuming from checkpoint: seed={}, checked={}, found={}", 
+                    checkpoint.last_seed, checkpoint.checked_count, checkpoint.found_count);
+                (checkpoint.last_seed + 1, checkpoint.checked_count, checkpoint.found_count)
+            } else {
+                warn!("Checkpoint entropy_bits mismatch. Starting from beginning.");
+                (0, 0, 0)
+            }
+        } else {
+            (0, 0, 0)
+        };
 
         // Create log file
         let log_file = OpenOptions::new()
@@ -542,10 +541,10 @@ fn main() {
         let log_file = Arc::new(Mutex::new(log_file));
 
         info!("=== Brute Force ALL Mode (Full 2^32 Space) ===");
-        info!("Start seed: {}", 0);
+        info!("Start seed: {}", start_seed);
         info!("End seed: {}", u32::MAX);
         info!("Entropy bits: {}", entropy_bits);
-        info!("Total seeds to check: {}", (u32::MAX as u64) + 1 - (0 as u64));
+        info!("Total seeds to check: {}", (u32::MAX as u64) + 1 - (start_seed as u64));
         info!(
             "Using multi-threading with {} threads",
             rayon::current_num_threads()
@@ -554,92 +553,85 @@ fn main() {
         info!("Checkpoint file: {}", checkpoint_filename);
         info!("Starting brute force...\n");
 
-        let checked = Arc::new(AtomicU64::new(0));
-        let found = Arc::new(AtomicU32::new(0));
+        let checked = Arc::new(AtomicU64::new(initial_checked));
+        let found = Arc::new(AtomicU32::new(initial_found));
         let report_interval = 1000;
-        let checkpoint_interval = 10000; // Save checkpoint every 10000 seeds
-        let checkpoint_file_arc = Arc::new(checkpoint_filename.clone());
+        let chunk_size: u32 = 10_000;
+        
+        // Process in chunks for safe checkpointing
+        let mut current_seed: u64 = start_seed as u64;
+        let max_seed: u64 = u32::MAX as u64;
+        
+        while current_seed <= max_seed {
+            let chunk_start = current_seed as u32;
+            let chunk_end = std::cmp::min(current_seed + chunk_size as u64 - 1, max_seed) as u32;
+            
+            info!("Processing chunk: {} to {}", chunk_start, chunk_end);
+            
+            // Process this chunk in parallel
+            (chunk_start..=chunk_end).into_par_iter().for_each(|seed| {
+                debug!("Processing seed: {}", seed);
+                let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
+                let entropy_hex = entropy.encode_hex::<String>();
+                let mnemonic = entropy_to_mnemonic(&entropy);
+                let addresses = mnemonic_to_all_addrs(&mnemonic);
 
-        (0..=u32::MAX).into_par_iter().for_each(|seed| {
-            debug!("Processing seed: {}", seed);
-            let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
-            let entropy_hex = entropy.encode_hex::<String>();
-            let mnemonic = entropy_to_mnemonic(&entropy);
-            let addresses = mnemonic_to_all_addrs(&mnemonic);
+                let current_checked = checked.fetch_add(1, Ordering::Relaxed);
 
-            let current_checked = checked.fetch_add(1, Ordering::Relaxed);
+                // Report progress
+                if current_checked % report_interval == 0 {
+                    let current_found = found.load(Ordering::Relaxed);
+                    info!(
+                        "Progress: checked={}, found={}, current_seed={}",
+                        current_checked, current_found, seed
+                    );
+                }
 
-            // Report progress
-            if current_checked % report_interval == 0 {
-                let current_found = found.load(Ordering::Relaxed);
-                info!(
-                    "Progress: checked={}, found={}, current_seed={}",
-                    current_checked, current_found, seed
-                );
-            }
-
-            // Save checkpoint periodically
-            // if current_checked % checkpoint_interval == 0 {
-                // let checkpoint = Checkpoint {
-                //     last_seed: seed,
-                //     entropy_bits,
-                //     checked_count: current_checked,
-                //     found_count: found.load(Ordering::Relaxed),
-                // };
-                // save_checkpoint(&checkpoint_file_arc, &checkpoint);
-                // debug!("Checkpoint saved at seed {}", seed);
-            // }
-
-            // Check all BIP addresses in local DB
-            for (bip_type, address) in &addresses {
-                match check_address_exists_local(&db, &address.to_string()) {
-                    Ok(exists) => {
-                        if exists {
-                            let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
-                            info!("╔═══════════════════════════════════════════════════════════════╗");
-                            info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
-                            info!("╚═══════════════════════════════════════════════════════════════╝");
-                            info!("Seed: {}", seed);
-                            info!("BIP Type: {}", bip_type);
-                            info!("Address: {}", address);
-                            info!("Mnemonic: {}", mnemonic);
-                            info!("Total found so far: {}", new_found);
-                            info!("═══════════════════════════════════════════════════════════════\n");
-                            log_address_to_file(
-                                &log_file,
-                                seed,
-                                &entropy_hex,
-                                &mnemonic.to_string(),
-                                &address.to_string(),
-                                bip_type,
-                                Some("found in local DB"),
-                            );
+                // Check all BIP addresses in local DB
+                for (bip_type, address) in &addresses {
+                    match check_address_exists_local(&db, &address.to_string()) {
+                        Ok(exists) => {
+                            if exists {
+                                let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
+                                info!("╔═══════════════════════════════════════════════════════════════╗");
+                                info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
+                                info!("╚═══════════════════════════════════════════════════════════════╝");
+                                info!("Seed: {}", seed);
+                                info!("BIP Type: {}", bip_type);
+                                info!("Address: {}", address);
+                                info!("Mnemonic: {}", mnemonic);
+                                info!("Total found so far: {}", new_found);
+                                info!("═══════════════════════════════════════════════════════════════\n");
+                                log_address_to_file(
+                                    &log_file,
+                                    seed,
+                                    &entropy_hex,
+                                    &mnemonic.to_string(),
+                                    &address.to_string(),
+                                    bip_type,
+                                    Some("found in local DB"),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error checking local DB for {} {}: {}", bip_type, address, e);
                         }
                     }
-                    Err(e) => {
-                        error!("Error checking local DB for {} {}: {}", bip_type, address, e);
-                    }
                 }
-            }
-
-            // Check if address already exists in log
-            // if let Some(existing_balance) = existing_addresses.get(&address.to_string()) {
-            //     debug!("Address {} already checked, skipping", address);
-            //     if existing_balance.is_some() && !existing_balance.as_ref().unwrap().starts_with("0") {
-            //         found.fetch_add(1, Ordering::Relaxed);
-            //     }
-            //     return;
-            // }
-
-            // Bloom filter check - skip API call if address not in filter
-            // if let Some(filter) = &bloom_filter {
-            //     if !filter.contains(address.to_string().as_bytes()) {
-            //         // Address not in bloom filter, skip API check
-            //         return;
-            //     }
-            //     info!("Bloom filter MATCH for seed {}: {}", seed, address);
-            // }
-        });
+            });
+            
+            // After chunk completes, save checkpoint
+            let checkpoint = Checkpoint {
+                last_seed: chunk_end,
+                entropy_bits,
+                checked_count: checked.load(Ordering::Relaxed),
+                found_count: found.load(Ordering::Relaxed),
+            };
+            save_checkpoint(&checkpoint_filename, &checkpoint);
+            info!("Checkpoint saved after processing seed {}", chunk_end);
+            
+            current_seed = chunk_end as u64 + 1;
+        }
 
         info!("\n=== Brute Force Complete ===");
         info!("Total seeds checked: {}", checked.load(Ordering::Relaxed));
@@ -720,71 +712,82 @@ fn main() {
         let checked = Arc::new(AtomicU64::new(initial_checked));
         let found = Arc::new(AtomicU32::new(initial_found));
         let report_interval = 1000;
-        let checkpoint_interval = 10000; // Save checkpoint every 10000 seeds
-        let checkpoint_file_arc = Arc::new(checkpoint_filename.clone());
+        let chunk_size: u32 = 10_000;
+        
+        // Process in chunks for safe checkpointing
+        let mut current_seed: u64 = resume_seed as u64;
+        let max_seed: u64 = end_seed as u64;
+        
+        while current_seed <= max_seed {
+            let chunk_start = current_seed as u32;
+            let chunk_end = std::cmp::min(current_seed + chunk_size as u64 - 1, max_seed) as u32;
+            
+            info!("Processing chunk: {} to {}", chunk_start, chunk_end);
+            
+            // Process this chunk in parallel
+            (chunk_start..=chunk_end).into_par_iter().for_each(|seed| {
+                debug!("Processing seed: {}", seed);
+                let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
+                let entropy_hex = entropy.encode_hex::<String>();
+                let mnemonic = entropy_to_mnemonic(&entropy);
+                let addresses = mnemonic_to_all_addrs(&mnemonic);
 
-        (resume_seed..=end_seed).into_par_iter().for_each(|seed| {
-            debug!("Processing seed: {}", seed);
-            let entropy = mt19937_bytes_from_seed(seed, entropy_bytes);
-            let entropy_hex = entropy.encode_hex::<String>();
-            let mnemonic = entropy_to_mnemonic(&entropy);
-            let addresses = mnemonic_to_all_addrs(&mnemonic);
+                let current_checked = checked.fetch_add(1, Ordering::Relaxed);
 
-            let current_checked = checked.fetch_add(1, Ordering::Relaxed);
+                // Report progress
+                if current_checked % report_interval == 0 {
+                    let current_found = found.load(Ordering::Relaxed);
+                    info!(
+                        "Progress: checked={}, found={}, current_seed={}",
+                        current_checked, current_found, seed
+                    );
+                }
 
-            // Report progress
-            if current_checked % report_interval == 0 {
-                let current_found = found.load(Ordering::Relaxed);
-                info!(
-                    "Progress: checked={}, found={}, current_seed={}",
-                    current_checked, current_found, seed
-                );
-            }
-
-            // Save checkpoint periodically
-            if current_checked % checkpoint_interval == 0 {
-                let checkpoint = Checkpoint {
-                    last_seed: seed,
-                    entropy_bits,
-                    checked_count: current_checked,
-                    found_count: found.load(Ordering::Relaxed),
-                };
-                save_checkpoint(&checkpoint_file_arc, &checkpoint);
-                debug!("Checkpoint saved at seed {}", seed);
-            }
-
-            // Check all BIP addresses in local DB
-            for (bip_type, address) in &addresses {
-                match check_address_exists_local(&db, &address.to_string()) {
-                    Ok(exists) => {
-                        if exists {
-                            let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
-                            info!("╔═══════════════════════════════════════════════════════════════╗");
-                            info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
-                            info!("╚═══════════════════════════════════════════════════════════════╝");
-                            info!("Seed: {}", seed);
-                            info!("BIP Type: {}", bip_type);
-                            info!("Address: {}", address);
-                            info!("Mnemonic: {}", mnemonic);
-                            info!("Total found so far: {}", new_found);
-                            info!("═══════════════════════════════════════════════════════════════\n");
-                            log_address_to_file(
-                                &log_file,
-                                seed,
-                                &entropy_hex,
-                                &mnemonic.to_string(),
-                                &address.to_string(),
-                                bip_type,
-                                Some("found in local DB"),
-                            );
+                // Check all BIP addresses in local DB
+                for (bip_type, address) in &addresses {
+                    match check_address_exists_local(&db, &address.to_string()) {
+                        Ok(exists) => {
+                            if exists {
+                                let new_found = found.fetch_add(1, Ordering::Relaxed) + 1;
+                                info!("╔═══════════════════════════════════════════════════════════════╗");
+                                info!("║ FOUND ADDRESS IN LOCAL DATABASE!");
+                                info!("╚═══════════════════════════════════════════════════════════════╝");
+                                info!("Seed: {}", seed);
+                                info!("BIP Type: {}", bip_type);
+                                info!("Address: {}", address);
+                                info!("Mnemonic: {}", mnemonic);
+                                info!("Total found so far: {}", new_found);
+                                info!("═══════════════════════════════════════════════════════════════\n");
+                                log_address_to_file(
+                                    &log_file,
+                                    seed,
+                                    &entropy_hex,
+                                    &mnemonic.to_string(),
+                                    &address.to_string(),
+                                    bip_type,
+                                    Some("found in local DB"),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error checking local DB for {} {}: {}", bip_type, address, e);
                         }
                     }
-                    Err(e) => {
-                        error!("Error checking local DB for {} {}: {}", bip_type, address, e);
-                    }
                 }
-            }
-        });
+            });
+            
+            // After chunk completes, save checkpoint
+            let checkpoint = Checkpoint {
+                last_seed: chunk_end,
+                entropy_bits,
+                checked_count: checked.load(Ordering::Relaxed),
+                found_count: found.load(Ordering::Relaxed),
+            };
+            save_checkpoint(&checkpoint_filename, &checkpoint);
+            info!("Checkpoint saved after processing seed {}", chunk_end);
+            
+            current_seed = chunk_end as u64 + 1;
+        }
 
         info!("\n=== Brute Force Complete ===");
         info!("Total seeds checked: {}", checked.load(Ordering::Relaxed));
