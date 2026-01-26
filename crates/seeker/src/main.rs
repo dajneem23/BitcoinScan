@@ -303,17 +303,67 @@ fn get_balance_with_fallback(
     Err("All APIs failed".into())
 }
 
+/// C++ std::mt19937 compatible implementation
+struct CppMt19937 {
+    mt: [u32; 624],
+    index: usize,
+}
+
+impl CppMt19937 {
+    fn new(seed: u32) -> Self {
+        let mut mt = [0u32; 624];
+        mt[0] = seed;
+        for i in 1..624 {
+            let prev = mt[i - 1];
+            mt[i] = 1812433253u32
+                .wrapping_mul(prev ^ (prev >> 30))
+                .wrapping_add(i as u32);
+        }
+        Self { mt, index: 624 }
+    }
+
+    fn gen(&mut self) -> u32 {
+        if self.index >= 624 {
+            self.twist();
+        }
+        let mut y = self.mt[self.index];
+        self.index += 1;
+
+        // Tempering
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c5680;
+        y ^= (y << 15) & 0xefc60000;
+        y ^= y >> 18;
+        y
+    }
+
+    fn twist(&mut self) {
+        for i in 0..624 {
+            let y = (self.mt[i] & 0x80000000) | (self.mt[(i + 1) % 624] & 0x7fffffff);
+            self.mt[i] = self.mt[(i + 397) % 624] ^ (y >> 1);
+            if y % 2 != 0 {
+                self.mt[i] ^= 0x9908b0df;
+            }
+        }
+        self.index = 0;
+    }
+}
+
 /// Produce N bytes from MT19937 (32-bit) by repeatedly drawing 32-bit words.
 /// This mimics the vulnerable code: seed mt19937 with a 32-bit seed, then
-/// take bytes from the PRNG to form an entropy buffer.
+/// take bytes from the PRNG to form an entropy buffer using std::uniform_int_distribution<uint16_t>(0, 255)
 fn mt19937_bytes_from_seed(seed: u32, out_len: usize) -> Vec<u8> {
-    let mut mt: MT19937 = SeedableRng::from_seed(seed as u64);
+    let mut mt = CppMt19937::new(seed);
     let mut out = Vec::with_capacity(out_len);
-    while out.len() < out_len {
-        let v: u32 = mt.gen();
-        out.push(v as u8); // Keep only the lowest 8 bits
+    
+    // std::uniform_int_distribution<uint16_t>(0, 255) implementation
+    // For range [0, 255], this is a power of 2 minus 1, so it uses rejection sampling
+    // However, 256 is a power of 2, so we can use masking efficiently
+    // The C++ implementation for [0, 255] typically just masks the lower 8 bits
+    for _ in 0..out_len {
+        let v = mt.gen();
+        out.push((v & 0xFF) as u8);
     }
-    out.truncate(out_len);
     out
 }
 
@@ -828,6 +878,17 @@ fn main() {
     // Build mnemonic from entropy
     let mnemonic = entropy_to_mnemonic(&entropy);
     info!("Mnemonic: {}", mnemonic.to_string());
+
+    info!("\n=== Deriving Bitcoin Addresses ===");
+    // let bip39_addr = mnemonic_to_bip39_addr(&mnemonic);
+    // info!("BIP39 Address (P2PKH): {}", bip39_addr);
+
+    let bip44_addr = mnemonic_to_bip44_addr(&mnemonic);
+    info!("BIP44 Address (P2PKH): {}", bip44_addr);
+    let bip49_addr = mnemonic_to_bip49_addr(&mnemonic);
+    info!("BIP49 Address (P2SH-P2WPKH): {}", bip49_addr);
+    let bip84_addr = mnemonic_to_bip84_addr(&mnemonic);
+    info!("BIP84 Address (P2WPKH): {}", bip84_addr);
 
     // Derive all Bitcoin addresses
     // let addresses = mnemonic_to_all_addrs(&mnemonic);
